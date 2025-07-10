@@ -2,8 +2,9 @@
 
 Stamp JPEG photos with GPS coordinates and **correct local timestamps** using your Google Maps `Timeline.json` export.
 
-Why?  
-Digital cameras often stay on a single timezone (e.g. your home). When you travel, photo **timestamps are wrong** and lack location data. That breaks Google Photos search and map view. This tool:
+*Why?*
+
+Digital cameras (mirrorless/DSLRs) often stay on a single timezone (e.g. your home) if they lack a GPS unit. When you travel, photo **timestamps are wrong** and lack location data. That breaks Google Photos search and map view. This tool:
 
 1. Streams your huge `Timeline.json` (no 3rd-party servers, memory-safe)
 2. Matches each photo to the nearest timeline point (default ≤ 60 min)
