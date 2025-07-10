@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timeline-stamp"
+version = "0.1.0"
+description = "Stamp JPEG photos with GPS + local-time using Google Timeline export"
+authors = [ { name = "Edward", email = "edward.auc@gmail.com" } ]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "ijson",
+    "python-dateutil",
+    "pytz",
+    "timezonefinder",
+    "piexif",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+]
+
+[project.scripts]
+timeline-stamp = "timeline_stamp:main" 

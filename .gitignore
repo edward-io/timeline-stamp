@@ -1,0 +1,16 @@
+# Large personal data
+Timeline.json
+photos/
+
+# Backup files created by script
+*.exif_backup
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.env
+
+# Packaging / build artifacts
+*.egg-info/
+dist/
+build/ 
