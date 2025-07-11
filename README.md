@@ -1,6 +1,6 @@
 # Timeline-Stamp
 
-Stamp JPEG photos with GPS coordinates and **correct local timestamps** using your Google Maps `Timeline.json` export.
+Stamp JPEG photos with GPS coordinates and **correct local timestamps** using your [Google Maps](https://support.google.com/maps/answer/6258979?hl=en&co=GENIE.Platform%3DAndroid) `Timeline.json` export.
 
 *Why?*
 
@@ -10,6 +10,8 @@ Digital cameras (mirrorless/DSLRs) often stay on a single timezone (e.g. your ho
 2. Matches each photo to the nearest timeline point (default ≤ 60 min)
 3. Determines the correct local timezone at that coordinate
 4. Writes GPS tags and converts the EXIF `DateTime*` fields into local time (adding `OffsetTime*` tags so Google Photos understands). If the photo already has GPS, it is **skipped by default** to keep the script idempotent (use `--overwrite-gps` to override).
+
+Note: You need [Google Maps Timeline](https://support.google.com/maps/answer/6258979?hl=en&co=GENIE.Platform%3DAndroid) enabled during the time your photos were taken.
 
 ---
 
