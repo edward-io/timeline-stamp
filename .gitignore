@@ -9,6 +9,7 @@ photos/
 __pycache__/
 *.py[cod]
 .env
+.venv/
 
 # Packaging / build artifacts
 *.egg-info/

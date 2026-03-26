@@ -26,4 +26,12 @@ classifiers = [
 ]
 
 [project.scripts]
-timeline-stamp = "timeline_stamp:main" 
+timeline-stamp = "timeline_stamp:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<8.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

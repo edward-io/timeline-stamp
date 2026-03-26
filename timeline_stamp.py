@@ -47,8 +47,8 @@ import argparse
 import bisect
 import datetime as dt
 import logging
-import math
 import pathlib
+import re
 import sys
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -71,6 +71,22 @@ class TimelinePoint:
     time_utc: dt.datetime
     lat: float
     lon: float
+
+
+class PhotoTimestampError(Exception):
+    """Base exception for EXIF timestamp resolution failures."""
+
+
+class MissingDateTimeOriginalError(PhotoTimestampError):
+    """Photo has no EXIF DateTimeOriginal tag."""
+
+
+class NonexistentDateTimeOriginalError(PhotoTimestampError):
+    """Photo timestamp does not exist in the configured camera timezone."""
+
+
+class AmbiguousDateTimeOriginalError(PhotoTimestampError):
+    """Photo timestamp maps to multiple UTC instants."""
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +147,13 @@ def _parse_latlng(ll_str: str) -> Tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 tf = TimezoneFinder()
+JPEG_SUFFIXES = {".jpg", ".jpeg"}
+EXIF_OFFSET_TAGS = (
+    piexif.ExifIFD.OffsetTimeOriginal,
+    piexif.ExifIFD.OffsetTimeDigitized,
+    piexif.ExifIFD.OffsetTime,
+)
+EXIF_OFFSET_RE = re.compile(r"^([+-])(\d{2}):(\d{2})$")
 
 
 def find_nearest_timeline_point(points: List[TimelinePoint], ts: dt.datetime) -> TimelinePoint | None:
@@ -147,11 +170,112 @@ def find_nearest_timeline_point(points: List[TimelinePoint], ts: dt.datetime) ->
     return min(candidates, key=lambda p: abs(p.time_utc - ts))
 
 
+def find_photo_paths(photos_dir: pathlib.Path) -> List[pathlib.Path]:
+    """Return JPEG paths recursively, matching extensions case-insensitively."""
+    return sorted(
+        path
+        for path in photos_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in JPEG_SUFFIXES
+    )
+
+
+def _decode_exif_text(value: bytes | str) -> str:
+    if isinstance(value, bytes):
+        return value.decode().strip("\x00").strip()
+    return value.strip("\x00").strip()
+
+
+def _parse_offset_tz(offset_value: str) -> dt.tzinfo:
+    match = EXIF_OFFSET_RE.fullmatch(offset_value)
+    if match is None:
+        raise ValueError(f"Invalid EXIF offset: {offset_value!r}")
+    sign_text, hours_text, minutes_text = match.groups()
+    offset = dt.timedelta(hours=int(hours_text), minutes=int(minutes_text))
+    if sign_text == "-":
+        offset = -offset
+    return dt.timezone(offset)
+
+
+def _datetime_original_text(exif_dict) -> str:
+    raw_original = exif_dict.get("Exif", {}).get(piexif.ExifIFD.DateTimeOriginal)
+    if not raw_original:
+        raise MissingDateTimeOriginalError("has no DateTimeOriginal")
+    return _decode_exif_text(raw_original)
+
+
+def _photo_timestamp_candidates_utc(exif_dict, camera_tz: pytz.BaseTzInfo) -> list[dt.datetime]:
+    original_str = _datetime_original_text(exif_dict)
+    naive_dt = dt.datetime.strptime(original_str, "%Y:%m:%d %H:%M:%S")
+
+    for tag in EXIF_OFFSET_TAGS:
+        raw_offset = exif_dict.get("Exif", {}).get(tag)
+        if not raw_offset:
+            continue
+        try:
+            offset_tz = _parse_offset_tz(_decode_exif_text(raw_offset))
+        except ValueError:
+            LOGGER.warning("Ignoring invalid EXIF offset %r", raw_offset)
+            continue
+        return [naive_dt.replace(tzinfo=offset_tz).astimezone(dt.timezone.utc)]
+
+    try:
+        return [camera_tz.localize(naive_dt, is_dst=None).astimezone(dt.timezone.utc)]
+    except pytz.NonExistentTimeError as exc:
+        raise NonexistentDateTimeOriginalError(
+            f"DateTimeOriginal {original_str} does not exist in camera timezone {camera_tz.zone}"
+        ) from exc
+    except pytz.AmbiguousTimeError:
+        return sorted(
+            camera_tz.localize(naive_dt, is_dst=is_dst).astimezone(dt.timezone.utc)
+            for is_dst in (True, False)
+        )
+
+
+def _photo_timestamp_utc(exif_dict, camera_tz: pytz.BaseTzInfo) -> dt.datetime:
+    candidates = _photo_timestamp_candidates_utc(exif_dict, camera_tz)
+    if len(candidates) > 1:
+        raise AmbiguousDateTimeOriginalError(
+            f"DateTimeOriginal {_datetime_original_text(exif_dict)} is ambiguous in camera timezone {camera_tz.zone}"
+        )
+    return candidates[0]
+
+
+def _resolve_photo_timestamp_utc(
+    points: List[TimelinePoint],
+    exif_dict,
+    camera_tz: pytz.BaseTzInfo,
+    max_gap: dt.timedelta,
+) -> tuple[dt.datetime, TimelinePoint] | None:
+    candidates = _photo_timestamp_candidates_utc(exif_dict, camera_tz)
+    ranked_matches = []
+
+    for candidate in candidates:
+        tl_point = find_nearest_timeline_point(points, candidate)
+        if tl_point is None:
+            continue
+        gap = abs(tl_point.time_utc - candidate)
+        if gap <= max_gap:
+            ranked_matches.append((gap, candidate, tl_point))
+
+    if not ranked_matches:
+        return None
+
+    ranked_matches.sort(key=lambda item: (item[0], item[1]))
+    if len(ranked_matches) > 1 and ranked_matches[0][0] == ranked_matches[1][0]:
+        raise AmbiguousDateTimeOriginalError(
+            f"DateTimeOriginal {_datetime_original_text(exif_dict)} is ambiguous and timeline matching could not disambiguate it"
+        )
+
+    _, photo_dt_utc, tl_point = ranked_matches[0]
+    return photo_dt_utc, tl_point
+
+
 def update_photo(
     filepath: pathlib.Path,
     tl_point: TimelinePoint,
     camera_tz: pytz.BaseTzInfo,
     *,
+    photo_dt_utc: dt.datetime | None = None,
     apply: bool = False,
     backup: bool = False,
     overwrite_gps: bool = False,
@@ -167,16 +291,18 @@ def update_photo(
             LOGGER.debug("%s already has GPS tags; skipping", filepath.name)
             return False
 
-    # Original naive timestamp ➔ assume camera_tz
-    try:
-        original_str = exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal].decode()
-    except KeyError:
-        LOGGER.warning("%s has no DateTimeOriginal; skipped", filepath.name)
-        return False
-
-    naive_dt = dt.datetime.strptime(original_str, "%Y:%m:%d %H:%M:%S")
-    aware_pst = camera_tz.localize(naive_dt)
-    aware_utc = aware_pst.astimezone(dt.timezone.utc)
+    # Use the resolved capture moment from EXIF offset tags or the camera timezone.
+    if photo_dt_utc is not None:
+        aware_utc = photo_dt_utc
+    else:
+        try:
+            aware_utc = _photo_timestamp_utc(exif_dict, camera_tz)
+        except MissingDateTimeOriginalError:
+            LOGGER.warning("%s has no DateTimeOriginal; skipped", filepath.name)
+            return False
+        except PhotoTimestampError as exc:
+            LOGGER.warning("%s %s; skipped", filepath.name, exc)
+            return False
 
     # Local timezone by coord
     tz_name = tf.timezone_at(lat=tl_point.lat, lng=tl_point.lon)
@@ -276,7 +402,7 @@ def main(argv: list[str] | None = None):
         LOGGER.error("No timeline points extracted – exiting.")
         sys.exit(1)
 
-    photo_paths = sorted(p for p in args.photos.rglob("*.jp*g"))
+    photo_paths = find_photo_paths(args.photos)
     if not photo_paths:
         LOGGER.error("No JPEGs found in %s", args.photos)
         sys.exit(1)
@@ -288,21 +414,34 @@ def main(argv: list[str] | None = None):
     for photo in photo_paths:
         try:
             exif_dict = piexif.load(str(photo))
-            orig_bytes = exif_dict["Exif"].get(piexif.ExifIFD.DateTimeOriginal)
-            if not orig_bytes:
+            try:
+                resolved = _resolve_photo_timestamp_utc(points, exif_dict, camera_tz, max_gap)
+            except MissingDateTimeOriginalError:
                 LOGGER.info("%s lacks DateTimeOriginal, skipping", photo.name)
                 skipped += 1
                 continue
-            naive_dt = dt.datetime.strptime(orig_bytes.decode(), "%Y:%m:%d %H:%M:%S")
-            photo_dt_utc = camera_tz.localize(naive_dt).astimezone(dt.timezone.utc)
-            tl_point = find_nearest_timeline_point(points, photo_dt_utc)
-            if tl_point is None or abs(tl_point.time_utc - photo_dt_utc) > max_gap:
+            except PhotoTimestampError as exc:
+                LOGGER.warning("%s %s; skipping", photo.name, exc)
+                skipped += 1
+                continue
+            if resolved is None:
                 LOGGER.info("%s has no close timeline match (gap > %s); skipping", photo.name, max_gap)
                 skipped += 1
                 continue
-            would_update = update_photo(photo, tl_point, camera_tz, apply=args.apply, backup=args.backup, overwrite_gps=args.overwrite_gps)
+            photo_dt_utc, tl_point = resolved
+            would_update = update_photo(
+                photo,
+                tl_point,
+                camera_tz,
+                photo_dt_utc=photo_dt_utc,
+                apply=args.apply,
+                backup=args.backup,
+                overwrite_gps=args.overwrite_gps,
+            )
             if would_update:
                 processed += 1
+            else:
+                skipped += 1
         except Exception as exc:
             LOGGER.warning("Failed to process %s: %s", photo.name, exc)
             skipped += 1

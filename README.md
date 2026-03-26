@@ -17,11 +17,18 @@ Note: You need [Google Maps Timeline](https://support.google.com/maps/answer/625
 
 ## Installation
 
-### From source (editable)
+### With uv
 
 ```bash
-# Clone then install with modern PEP 517 build:
-pip install -e .
+# Create/update the project environment, including test dependencies:
+uv sync --dev
+```
+
+Run commands through the managed environment:
+
+```bash
+uv run timeline-stamp --help
+uv run pytest
 ```
 
 ---
@@ -35,7 +42,7 @@ First, get get your Timeline.json file from on your phone (its easiest to copy t
 To run:
 
 ```bash
-timeline-stamp --timeline /path/Timeline.json --photos /path/to/jpegs [options]
+uv run timeline-stamp --timeline /path/Timeline.json --photos /path/to/jpegs [options]
 ```
 
 Required flags:
@@ -47,7 +54,7 @@ Optional flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--camera-tz` | `America/Los_Angeles` | Timezone your camera clock was set to when shooting |
+| `--camera-tz` | `America/Los_Angeles` | Timezone your camera clock was set to when shooting. If a photo already has OffsetTimeOriginal/OffsetTimeDigitized, the script uses those instead and --camera-tz is irrelevant for that file. |
 | `--max-gap-minutes` | `60` | Maximum allowed time difference between photo and timeline point |
 | `--apply` | *off* | Actually modify files. Without this, the script only prints what **would** change |
 | `--backup` | *off* | When used *together with* `--apply`, create `photo.jpg.exif_backup` before writing |
@@ -58,7 +65,7 @@ Examples:
 
 Dry-run (safe):
 ```bash
-timeline-stamp \
+uv run timeline-stamp \
   --timeline ~/Downloads/Timeline.json \
   --photos   ~/Pictures/TripR5 \
   --camera-tz America/Los_Angeles         # camera set to PST
@@ -66,7 +73,7 @@ timeline-stamp \
 
 Apply changes, with backups:
 ```bash
-timeline-stamp \
+uv run timeline-stamp \
   --timeline ~/Downloads/Timeline.json \
   --photos   ~/Pictures/TripR5 \
   --apply --backup --verbose
@@ -79,7 +86,9 @@ timeline-stamp \
 1. `ijson` streams `semanticSegments.*` so the timeline file never loads fully.
 2. `timelinePath` points and `visit` midpoints become `(UTC time, lat, lon)` records sorted for binary search.
 3. For each photo:  
-   * EXIF `DateTimeOriginal` is assumed to be in `--camera-tz`.
+   * If EXIF `OffsetTime*` tags already exist, they are used to preserve the original absolute capture time.
+   * Otherwise, EXIF `DateTimeOriginal` is assumed to be in `--camera-tz`.
+   * Ambiguous fall-back DST times are disambiguated using the nearest timeline match; nonexistent spring-forward times are skipped instead of guessed.
    * The closest timeline record ≤ `--max-gap-minutes` is selected.
    * `timezonefinder` maps lat/lon -> IANA TZ, then `pytz` converts time.
    * GPS + local time + `OffsetTime*` EXIF tags are written (if `--apply`).
